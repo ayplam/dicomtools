@@ -74,7 +74,6 @@ def encrypt_dicom_name(dcm):
     dcminf = []
 
     try:
-        print dcmname
         dcminf = dicom.read_file(dcmname)
     except IOError:
         0
