@@ -88,6 +88,10 @@ def encrypt_dicom_name(dcm):
             # Check to make sure dicom field exists.
             if hasattr(dcminf,field):
                 name = getattr(dcminf,field)
+				
+                # If it's not a string, skip
+                if not isinstance(name, basestring):
+                    continue
 
                 if bool_encrypt:
                     # encrypt the dicomfield
@@ -99,8 +103,7 @@ def encrypt_dicom_name(dcm):
 
                     # Ignore if the name has the words "anonymous" or "volunteer" in it
                     if ( name.lower().find("anonymous") >= 0 ) | ( name.lower().find("volunteer") >= 0 ):
-                        break
-
+                        continue
 
                     # The additional "_JNO" ending is a safety to prevent items 
                     # from being re-encrypted. It is assumed that if the name 
