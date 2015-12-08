@@ -61,9 +61,10 @@ def create_ascii_encrypt_key():
 KEY = create_ascii_encrypt_key();
 fields_to_anon = ['PatientsName','MedicalAlerts','PatientsAddress','SpecialNeeds']
 
+# For a single dicom file.
 def encrypt_dicom_name(dcm):
 
-    # Check if the file is a dicom
+    # ( dicomname, (bool_encrypt, bool_digitcheck))
     dcmname = dcm[0]
     opts = dcm[1]
     bool_encrypt = opts[0]
@@ -75,70 +76,71 @@ def encrypt_dicom_name(dcm):
 
     try:
         dcminf = dicom.read_file(dcmname)
-    except IOError:
-        0
-    except InvalidDicomError:
-        0
+    except:
+        # If not readable, simply exit
+        return
 
     # If it is a dicom, scramble all information.
-    if dcminf:
+    for field in fields_to_anon:
 
-        for field in fields_to_anon:
+        # Check to make sure dicom field exists.
+        if hasattr(dcminf,field):
+            name = getattr(dcminf,field)
 
-            # Check to make sure dicom field exists.
-            if hasattr(dcminf,field):
-                name = getattr(dcminf,field)
-				
-                # If it's not a string, skip
-                if not isinstance(name, basestring):
+            # If it's not a string, skip any anonymization for the field
+            if not isinstance(name, basestring):
+                continue
+            else:
+                name = name.encode('ascii','ignore')
+
+            if bool_encrypt:
+                # encrypt the dicomfield
+
+                if bool_digitcheck:
+                    bool_hasdigits = re.findall('\d+',name)
+                else:
+                    bool_hasdigits = False
+
+                # Ignore if the name has the words "anonymous" or "volunteer" in it
+                if ( name.lower().find("anonymous") >= 0 ) | ( name.lower().find("volunteer") >= 0 ):
                     continue
 
-                if bool_encrypt:
-                    # encrypt the dicomfield
 
-                    if bool_digitcheck:
-                        bool_hasdigits = re.findall('\d+',name)
-                    else:
-                        bool_hasdigits = False
+                # The additional "_JNO" ending is a safety to prevent items 
+                # from being re-encrypted. It is assumed that if the name 
+                # has any numbers, the patient field has already been anonymized.
+                if (name[-4:] != "_JNO") & (not bool_hasdigits):
 
-                    # Ignore if the name has the words "anonymous" or "volunteer" in it
-                    if ( name.lower().find("anonymous") >= 0 ) | ( name.lower().find("volunteer") >= 0 ):
-                        continue
+                    anon_name = encrypt_string(name,KEY) + "_JNO"
+                    setattr(dcminf,field,anon_name)
+                    bool_write = True
 
-                    # The additional "_JNO" ending is a safety to prevent items 
-                    # from being re-encrypted. It is assumed that if the name 
-                    # has any numbers, the patient field has already been anonymized.
-                    if (name[-4:] != "_JNO") & (not bool_hasdigits):
+            else:
 
-                        anon_name = encrypt_string(name,KEY) + "_JNO"
-                        setattr(dcminf,field,anon_name)
-                        bool_write = True
+                # If the name has "_JNO" as the ending, it has been encrypted
+                # and needs to be unencrypted.
+                if name[-4:] == "_JNO":
+                    anon_name = unencrypt_string(name[:-4],KEY)
+                    setattr(dcminf,field,anon_name)
+                    bool_write = True
 
-                else:
-
-                    # If the name has "_JNO" as the ending, it has been encrypted
-                    # and needs to be unencrypted.
-                    if name[-4:] == "_JNO":
-                        anon_name = unencrypt_string(name[:-4],KEY)
-                        setattr(dcminf,field,anon_name)
-                        bool_write = True
-
-        if bool_write:
-            dicom.write_file(dcmname,dcminf)
+    if bool_write:
+        dicom.write_file(dcmname,dcminf)
 
 
 def encrypt_string(string,randomizer):
     encryptd_string = ''
+
     for char in string:
-        encryptd_string += chr(int(randomizer[ord(char)-32]))
-        
+        encryptd_string += chr(int(randomizer[int(ord(char)-32)]))
+
     return encryptd_string
 
 def unencrypt_string(string,randomizer):
     unencrypt = np.argsort(KEY) + 32
     unencryptd_string = ''
     for char in string:
-        unencryptd_string += chr(int(unencrypt[ord(char)-32]))
+        unencryptd_string += chr(int(unencrypt[int(ord(char)-32)]))
         
     return unencryptd_string
     
@@ -187,13 +189,15 @@ def main():
         directories_to_anonymize = filter(None, dirs)
     else:
     # If no text file is specified, anonymize current directory
-        directories_to_anonymize = options.directory
+        directories_to_anonymize = [options.directory]
 
 
     # Create a tuple to send over to the encrypt_dicom_name
     opt_tuple = (options.anon,options.numbers)
 
-    p = Pool(10) # Use 10 processes to paralleze dicom anonymization
+    p = Pool(20) # Use 15 processes to paralleze dicom anonymization
+
+    print directories_to_anonymize
 
     # base is the base directory to search in and get ALL subfolders
     for base in directories_to_anonymize:
@@ -215,8 +219,19 @@ def main():
             #Append dicom options to each item        
             fullfilenames_options = [ [os.path.join(dirname,filename),opt_tuple] for filename in filenames]
 
-            # Use the pool to parallelze encryption
-            p.map(encrypt_dicom_name,fullfilenames_options)
+            # Sometimes this pulls an error. I'm not sure why, but there are five chances for it to retry.
+            for x in xrange(5):
+                try:
+                    # Use the pool to parallelze encryption
+                    p.map(encrypt_dicom_name,fullfilenames_options)
+                except:
+                    # If it's the fourth try, print the failed directory.
+                    if x == 4:
+                        print "DIRECTORY FAILED TO ANONYMIZE: ", dirname
+                    # Continue onto next "iteration" if it fails; skip the break
+                    continue
+
+                break
 
 
 if __name__ == '__main__':
