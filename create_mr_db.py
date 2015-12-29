@@ -33,28 +33,22 @@ import pandas as pd
 import dicom
 import numpy as np
 from datetime import datetime, timedelta
+from multiprocessing import Pool
 import sys
 from dicom.filereader import InvalidDicomError
 from optparse import OptionParser
 
 # fields should correspond to dcmfields (except the last two "nimgs" and "dir")
 # ie, pxname = PatientName; pxid = PatientID. The locations make a difference for where the columns will be located
-fields = ['pxname','pxid','datestr','acqtstr','studyuid','seriesuid','mrseq','manu','fa','tr','te','ti','nimgs','dir']
+fields = ['pxname','pxid','datestr','acqtstr','studyuid','seriesuid','mrseq','manu','fa','tr','te','ti']
 dcmfields = ['PatientName','PatientID','StudyDate','AcquisitionTime','StudyInstanceUID','SeriesInstanceUID', \
              'SeriesDescription', 'Manufacturer','FlipAngle','RepetitionTime','EchoTime','InversionTime']
+
+# These are the indices to check whether you have the same series or not.
 inds = [0,1,2,4,5,6]
 			 
-def get_all_dicominfo(directory,all_files):
+def get_db_dicominfo(filename):
     
-    # Get current directory
-    cwd = os.getcwd()
-    
-    # Change directory
-    os.chdir(directory)
-
-    # Unforunately you're also checking directories with glob.
-    # all_files = glob.glob('*')
-
     cnt = 0;
 
     dcm_inf_holder = []
@@ -67,68 +61,49 @@ def get_all_dicominfo(directory,all_files):
 
     # v1: Loop throughu ALL files. Find dicom files with unique PatientName/PatientID/UIDs (as notated by inds)
     # This is MUCH slower, but it finds multiple series within a folder.
+    cnt += 1;
 
-    for file in all_files:
+    # Error catching in case the file is not a valid dicom.
+    try:
+        dcminf = dicom.read_file(filename)
+    except:
+        return []
 
-        cnt += 1;
-
-        dcminf = []
-        dcmvals = []
-
-        # Error catching in case the file is not valid.
-        try:
-            dcminf = dicom.read_file(file)
-        except IOError:
-            0
-        except InvalidDicomError:
-            0
-
-        # If dicominfo exists, append all selected "dcmfields" into the list.
-        if dcminf:
-            for cnt,dcmfield in enumerate(dcmfields):
-                if hasattr(dcminf,dcmfield):
-                    dcmvals.append( getattr(dcminf,dcmfield) )
-                else:
-                    dcmvals.append(None)
-
-            dcmvals.append(len(all_files))
-            dcmvals.append(os.getcwd())
-        else:
-            # If no dicom image, set all dicom values to None (will appear as blank).
-            for dcmfield in dcmfields:
+    dcmvals = []
+    # If dicominfo exists, append all selected "dcmfields" into the list.
+    if dcminf:
+        for cnt,dcmfield in enumerate(dcmfields):
+            if hasattr(dcminf,dcmfield):
+                dcmvals.append( getattr(dcminf,dcmfield) )
+            else:
                 dcmvals.append(None)
-                
-            dcmvals[2] = '19000101'
-            dcmvals[3] = '000000'
+
+    else:
+        # If no dicom image, set all dicom values to None (will appear as blank).
+        for dcmfield in dcmfields:
+            dcmvals.append(None)
             
+        dcmvals[2] = '19000101'
+        dcmvals[3] = '000000'
         
-        # At the end, append the number of files in the folder (presumably number of dicoms)
-        # as well as the directory
-        dcmvals.append(len(all_files))
-        dcmvals.append(os.getcwd())
-
-        # Since there can be different series within a folder, this ensures that all series are captured. 
-        bIsDcmValUnique = True
-        for dcminfs in dcm_inf_holder:
-            chk1 = [dcminfs[ind] for ind in inds]
-            chk2 = [dcmvals[ind] for ind in inds]
-            if set(chk1) == set(chk2):
-                bIsDcmValUnique = False
-                break
-
-        if bIsDcmValUnique & (dcmvals[3] != '000000'):
-            dcm_inf_holder.append(dcmvals)
-
-
-    dict_holder = []
-    for item in dcm_inf_holder:
-        dict_holder.append(dict(zip(fields,item)))
     
-    # Return to original directory
-    os.chdir(cwd)
+    # At the end, append the number of files in the folder (presumably number of dicoms)
+    # as well as the directory
+    # dcmvals.append(len(all_files))
+    # dcmvals.append(os.getcwd())
+
+    # if bIsDcmValUnique & (dcmvals[3] != '000000'):
+    #     dcm_inf_holder.append(dcmvals)
 
     # Return a dictionary
-    return dict_holder
+    return dict(zip(fields,dcmvals))
+
+def remove_same_series(dcm_inf_holder):
+
+    # Since there can be different series within a folder, this ensures that all series are captured. 
+    return [dict(y) for y in set(tuple(x.items()) for x in dcm_inf_holder)]
+
+
 
 # Main loops through all folders
 def main():
@@ -138,7 +113,7 @@ def main():
     export = ['pxname','pxid','date','acqt','studyuid','seriesuid','mrseq','manu','fa','tr','te','ti','nimgs','dir']
 
     # Example (need to change directory to where create_mr_db.py is located):
-    # create_mr_db.py -f neostem_database.csv -d Z:\Users\Shared\Sleepystuff\images\EFFERVESCENT PATIENTS
+    # create_mr_db.py -f neostem_database.csv -d "Z:\Users\Shared\Sleepystuff\images\EFFERVESCENT PATIENTS"
     parser = OptionParser(usage="usage: %prog [options] filename")
     parser.add_option("-f", "--filename",
                       action="store",
@@ -170,29 +145,35 @@ def main():
     # csvname is the output filename
     csvname = options.filename
 
-    os.chdir(base)
+    p = Pool(10)
 
     cnt = 0
 
     # os.walk goes through every subdirectory as a loop. The current directory
     # in the loop is "dirname". All files in dirname are in a list, "filenames"
-    for dirname, dirnames, filenames in os.walk('.'):
+    for dirname, dirnames, filenames in os.walk(base):
 
         df = pd.DataFrame(data = None, columns = fields)        
-           
-        info = get_all_dicominfo(dirname, filenames)
 
-        # Should have an option to append all empty folders without dicoms to the dataframe or not.
-        df = pd.DataFrame(data = info, columns = fields)
-        cnt+=1
+        fullfilenames = [os.path.join(dirname,filename) for filename in filenames]
+        test = p.map(get_db_dicominfo,fullfilenames)
+        test = filter(None,test)
+        print dirname
+        print len(test)
+        test = remove_same_series(test)
+        print "SAME SERIES REMOVED: ", len(test)
 
-        # Failsafe in case the date or acquisition time doesn't exist. For some reason, this is actually a thing.
-        df['date'] = df['datestr'].apply(lambda s: '1900-00-00' if not s else datetime(year=int(s[0:4]), month=int(s[4:6]), day=int(s[6:8])))
-        df['acqt'] = df['acqtstr'].apply(lambda s: '00:00:00' if not s else str(s[:2]+':'+s[2:4]+':'+s[4:6]))
+        # # Should have an option to append all empty folders without dicoms to the dataframe or not.
+        # df = pd.DataFrame(data = info, columns = fields)
+        # cnt+=1
 
-        # Outputs are always appended to the csvfile. Nothing is ever overwritten.
-        with open(options.output + '/' + csvname, 'a') as f:
-            df[export].to_csv(f,sep=',',header=False)
+        # # Failsafe in case the date or acquisition time doesn't exist. For some reason, this is actually a thing.
+        # df['date'] = df['datestr'].apply(lambda s: '1900-00-00' if not s else datetime(year=int(s[0:4]), month=int(s[4:6]), day=int(s[6:8])))
+        # df['acqt'] = df['acqtstr'].apply(lambda s: '00:00:00' if not s else str(s[:2]+':'+s[2:4]+':'+s[4:6]))
+
+        # # Outputs are always appended to the csvfile. Nothing is ever overwritten.
+        # with open(options.output + '/' + csvname, 'a') as f:
+        #     df[export].to_csv(f,sep=',',header=False)
             
 
 if __name__ == '__main__':
